@@ -1,11 +1,12 @@
 import fs from "fs";
 import ejs from "ejs";
 import { resolve } from "path";
+import { getAllDeps, isGenerics, removeArraySign, removeGenericsSign } from "./utils";
 
 type In = "path" | "query" | "body" | "formdata";
 
 interface Param {
-  in: In; // 请求体类型
+  in?: In; // 变量所在位置
   name: string; // 参数名
   type: string; // 参数类型
   description: string; // 注释
@@ -13,16 +14,20 @@ interface Param {
 }
 
 interface API {
+  tag: string; // openapi tag，可用作文件名
   name: string; // 函数名
   description: string; // 注释
   request: {
-    url: string; // 请求地址
+    url: string; // 源请求地址
+    urlText: string; // 经过处理的Url字符串
     method: string; // 请求方法
     params: Param[]; // 参数
     // 过滤param
     filter: {
-      param: Param[]; // 请求参数
+      path: Param[]; // path变量
+      query: Param[]; // 请求参数
       body: Param[]; // 请求体
+      formdata: Param[]; // formdata
     };
   };
   response: {
@@ -30,7 +35,23 @@ interface API {
   };
 }
 
-const getType = (type: string) => {
+interface Type {
+  isGenerics: boolean; // 是否是泛型Type
+  name: string; // 类型名
+  description: string; // 注释
+  params: Param[]; // 参数
+}
+
+const getType = (param?: any, hasGenerics?: boolean): string => {
+  if (!param) {
+    return "any";
+  }
+
+  const { type } = param;
+  if (!type && param.originalRef) {
+    return param.originalRef;
+  }
+
   const numberEnum = [
     "int64",
     "integer",
@@ -59,6 +80,16 @@ const getType = (type: string) => {
   if (type === "boolean") {
     return "boolean";
   }
+  if (type === "object") {
+    return hasGenerics
+      ? "T"
+      : param.originalRef ?? param.additionalProperties?.type ?? "any";
+  }
+  if (type === "array") {
+    return hasGenerics
+      ? "T[]"
+      : `${param.items.originalRef ?? getType(param.items)}[]`;
+  }
 
   return "any";
 };
@@ -76,7 +107,7 @@ const getParams = (parameters: any, definitions: any): Param[] => {
       return {
         in: "body",
         name,
-        type: getType(parameter.type),
+        type: getType(parameter, false),
         description: parameter.description,
         required: false,
       };
@@ -87,14 +118,40 @@ const getParams = (parameters: any, definitions: any): Param[] => {
     return {
       in: parameter.in,
       name: parameter.name,
-      type: getType(parameter.type),
+      type: getType(parameter, false),
       description: parameter.description,
       required: parameter.required,
     };
   });
 };
 
-const getApis = (data: any): API[] => {
+const getUrlText = (path: string) => {
+  if (path.includes("{")) {
+    return `\`${path.replace(/{/g, "${pathVars.")}\``;
+  }
+
+  return `\'${path}\'`;
+};
+
+const getApis = (data: any, types: Type[]): API[] => {
+  const getResponseType = (responses: any, generics: string[]): string => {
+    const res = responses["200"];
+    if (res.schema?.type) {
+      return getType(res.schema);
+    }
+
+    if (res.schema?.originalRef) {
+      let type = res.schema?.originalRef?.replace(/«/g, "<").replace(/»/g, ">");
+      // 如果泛型Type没有内部泛型，填充一个<any>
+      if(getAllDeps(type).length === 1 && generics.includes(type)) {
+        type += '<any>';
+      }
+      return type;
+    }
+
+    return "any";
+  };
+
   const apis: API[] = [];
   Object.keys(data.paths).forEach((path: string) => {
     const methods = data.paths[path];
@@ -102,27 +159,77 @@ const getApis = (data: any): API[] => {
       const api = methods[method];
       const params = getParams(api.parameters, data.definitions);
       apis.push({
+        tag: api.tags?.[0],
         name: api.operationId,
         description: api.summary,
         request: {
-          url: path.replace('{', '${'),
+          url: path,
+          urlText: getUrlText(path),
           method: method.toUpperCase(),
           params,
           filter: {
-            param: params.filter((param) => param.in === "query"),
-            body: params.filter(
-              (param) => param.in === "body" || param.in === "formdata"
-            ),
+            path: params.filter((param) => param.in === "path"),
+            query: params.filter((param) => param.in === "query"),
+            body: params.filter((param) => param.in === "body"),
+            formdata: params.filter((param) => param.in === "formdata")
           },
         },
         response: {
-          type: "any",
+          type: getResponseType(api.responses, types.filter(type => type.isGenerics).map(type => removeGenericsSign(type.name))),
         },
       });
     });
   });
 
   return apis;
+};
+
+const getTypeParams = (properties: any, hasGenerics: boolean): Param[] => {
+  return Object.keys(properties).map((property) => {
+    const param = properties[property];
+    return {
+      isGenerics: hasGenerics,
+      name: property,
+      type: getType(param, hasGenerics),
+      description: param.description,
+      required: false,
+    };
+  });
+};
+
+const getTypes = (data: any) => {
+  // 找出所有的泛型
+  const generics = new Set<string>();
+  Object.keys(data.definitions).forEach((definition) => {
+    const genericArr = definition.split("«");
+    genericArr.pop();
+    genericArr.forEach((g) => generics.add(g));
+  });
+
+  // 取出所有的类型
+  const types: Type[] = [];
+  Object.keys(data.definitions).forEach((definition) => {
+    if (definition.split("«").length > 1) {
+      return;
+    }
+
+    const def = data.definitions[definition];
+    if (!def.properties) {
+      return;
+    }
+
+    const isGenerics =
+      generics.has(definition) &&
+      !types.some((type) => type.name === definition);
+    types.push({
+      isGenerics,
+      name: isGenerics ? `${definition}<T>` : definition,
+      description: def.description,
+      params: getTypeParams(def.properties, isGenerics),
+    });
+  });
+
+  return types;
 };
 
 const renderFile = (file: string, data: any): Promise<string> => {
@@ -136,11 +243,60 @@ const renderFile = (file: string, data: any): Promise<string> => {
   });
 };
 
-const generatService = async (data: any, output: string) => {
-  const apis = getApis(data);
-  const filePath = resolve(__dirname, '../', 'src', 'template', 'umi-request.ejs'); // 这里的__dirname指向dist
-  const service = await renderFile(filePath, { apis });
+const generateService = async (data: any, outputDir: string) => {
+  const types = getTypes(data);
+
+  // 写入type文件
+  const filePath = resolve(
+    __dirname, // 这里的__dirname指向dist
+    "../",
+    "src",
+    "template",
+    "type.ejs"
+  );
+  const service = await renderFile(filePath, { types });
+  const output = resolve(outputDir, "typings.ts");
   fs.writeFileSync(output, service);
+
+  const apis = getApis(data, types);
+
+  // 把api按tag分组
+  const tagMap = new Map<string, API[]>();
+  data.tags.forEach((tag: any) => {
+    tagMap.set(tag.name, []);
+  });
+  apis.forEach((api) => tagMap.get(api.tag)?.push(api));
+
+  // 写入service文件，tag为文件名
+  tagMap.forEach(async (apis, tag) => {
+    const filePath = resolve(
+      __dirname, // 这里的__dirname指向dist
+      "../",
+      "src",
+      "template",
+      "umi-request.ejs"
+    );
+    // 找出所有依赖
+    const deps = new Set<string>();
+    apis.forEach(api => {
+      // 找出request中的依赖
+      api.request.params.forEach(param => {
+        const dep = removeArraySign(param.type);
+        if(types.some(type => removeGenericsSign(type.name) === dep)) {
+          deps.add(dep);
+        }
+      })
+      // 找出response中的依赖
+      getAllDeps(api.response.type).forEach(dep => {
+        if(types.some(type => removeGenericsSign(type.name) === dep)) {
+          deps.add(dep);
+        }
+      })
+    });
+    const service = await renderFile(filePath, { deps, apis });
+    const output = resolve(outputDir, `${tag}.ts`);
+    fs.writeFileSync(output, service);
+  });
 };
 
-export default generatService;
+export default generateService;
