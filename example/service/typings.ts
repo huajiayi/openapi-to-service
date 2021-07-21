@@ -93,6 +93,16 @@ export type ResponseResult = {
 /**
 * 
 */
+export type ResultBody<T> = {
+  data?: number; // 承载数据
+  errorCode?: number; // 状态码
+  errorMassage?: string; // 返回消息
+  success?: boolean; // 是否成功
+}
+
+/**
+* 
+*/
 export type RulesVO = {
   batchNumber?: string; // 批次号
   condition?: number; // 获奖条件

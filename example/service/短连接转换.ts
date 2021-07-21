@@ -12,7 +12,7 @@ export async function generateShortUrlUsingGET (
   },
   options?: Record<string, any>,
 ) {
-  return request<R<string>>('/dwz', {
+  return request<R<any>>('/dwz', {
     method: 'GET',
     params: {
       ...params,

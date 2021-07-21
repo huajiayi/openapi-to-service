@@ -2,6 +2,7 @@ import request from 'umi-request';
 import {
   ReceivePrizeVO,
   PrizeVO,
+  ResultBody,
   PageInfo,
   HelpListVO,
 } from './typings';
@@ -79,7 +80,7 @@ export async function getPrizeStatusUsingGET (
   },
   options?: Record<string, any>,
 ) {
-  return request<ResultBody<long>>('/mobile/getPrizeStatus', {
+  return request<ResultBody<any>>('/mobile/getPrizeStatus', {
     method: 'GET',
     params: {
       ...params,

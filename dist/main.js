@@ -13,6 +13,12 @@
   const getAllDeps = (type) => {
       return type.split('<').map(t => t.replace(/>/g, '').replace(/\[\]/g, ''));
   };
+  const toGenericsTypes = (types) => {
+      return types.replace(/«/g, "<").replace(/»/g, ">");
+  };
+  const toGenerics = (types) => {
+      return types.length === 1 ? types[0] : `${types.join('<')}${types.slice(1).map(() => '>').join('')}`;
+  };
   const removeGenericsSign = (type) => {
       return type.replace(/<T>/g, '');
   };
@@ -108,11 +114,18 @@
               return getType(res.schema);
           }
           if (res.schema?.originalRef) {
-              let type = res.schema?.originalRef?.replace(/«/g, "<").replace(/»/g, ">");
-              if (getAllDeps(type).length === 1 && generics.includes(type)) {
-                  type += '<any>';
+              const type = res.schema?.originalRef?.replace(/«/g, "<").replace(/»/g, ">");
+              const deps = getAllDeps(type);
+              if (deps.length === 1 && generics.includes(type)) {
+                  return type + "<any>";
               }
-              return type;
+              const typesWithoutSign = types.map(type => removeGenericsSign(type.name));
+              for (let i = 0; i < deps.length; i++) {
+                  if (!typesWithoutSign.includes(deps[i])) {
+                      deps[i] = 'any';
+                  }
+              }
+              return toGenerics(deps);
           }
           return "any";
       };
@@ -135,11 +148,13 @@
                           path: params.filter((param) => param.in === "path"),
                           query: params.filter((param) => param.in === "query"),
                           body: params.filter((param) => param.in === "body"),
-                          formdata: params.filter((param) => param.in === "formdata")
+                          formdata: params.filter((param) => param.in === "formdata"),
                       },
                   },
                   response: {
-                      type: getResponseType(api.responses, types.filter(type => type.isGenerics).map(type => removeGenericsSign(type.name))),
+                      type: getResponseType(api.responses, types
+                          .filter((type) => type.isGenerics)
+                          .map((type) => removeGenericsSign(type.name))),
                   },
               });
           });
@@ -159,29 +174,34 @@
       });
   };
   const getTypes = (data) => {
+      const definitions = data.definitions || {};
       const generics = new Set();
-      Object.keys(data.definitions).forEach((definition) => {
+      Object.keys(definitions).forEach((definition) => {
           const genericArr = definition.split("«");
           genericArr.pop();
           genericArr.forEach((g) => generics.add(g));
       });
       const types = [];
-      Object.keys(data.definitions).forEach((definition) => {
-          if (definition.split("«").length > 1) {
-              return;
+      Object.keys(definitions).forEach((definition) => {
+          let defText = definition;
+          const deps = getAllDeps(toGenericsTypes(definition));
+          if (deps.length > 1) {
+              defText = deps[0];
           }
-          const def = data.definitions[definition];
+          const def = definitions[definition];
           if (!def.properties) {
               return;
           }
-          const isGenerics = generics.has(definition) &&
-              !types.some((type) => type.name === definition);
-          types.push({
-              isGenerics,
-              name: isGenerics ? `${definition}<T>` : definition,
-              description: def.description,
-              params: getTypeParams(def.properties, isGenerics),
-          });
+          if (!types.some((type) => removeGenericsSign(type.name) === defText)) {
+              console.log(defText);
+              const isGenerics = generics.has(defText);
+              types.push({
+                  isGenerics,
+                  name: isGenerics ? `${defText}<T>` : defText,
+                  description: def.description || '',
+                  params: getTypeParams(def.properties, isGenerics),
+              });
+          }
       });
       return types;
   };
@@ -203,22 +223,22 @@
       fs__default['default'].writeFileSync(output, service);
       const apis = getApis(data, types);
       const tagMap = new Map();
-      data.tags.forEach((tag) => {
+      data.tags?.forEach((tag) => {
           tagMap.set(tag.name, []);
       });
       apis.forEach((api) => tagMap.get(api.tag)?.push(api));
       tagMap.forEach(async (apis, tag) => {
           const filePath = path.resolve(__dirname, "../", "src", "template", "umi-request.ejs");
           const deps = new Set();
-          apis.forEach(api => {
-              api.request.params.forEach(param => {
+          apis.forEach((api) => {
+              api.request.params.forEach((param) => {
                   const dep = removeArraySign(param.type);
-                  if (types.some(type => removeGenericsSign(type.name) === dep)) {
+                  if (types.some((type) => removeGenericsSign(type.name) === dep)) {
                       deps.add(dep);
                   }
               });
-              getAllDeps(api.response.type).forEach(dep => {
-                  if (types.some(type => removeGenericsSign(type.name) === dep)) {
+              getAllDeps(api.response.type).forEach((dep) => {
+                  if (types.some((type) => removeGenericsSign(type.name) === dep)) {
                       deps.add(dep);
                   }
               });

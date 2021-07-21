@@ -71,7 +71,7 @@ export async function friendOverviewUsingGET (
   },
   options?: Record<string, any>,
 ) {
-  return request<R<JSONObject>>(`/statistic/friendOverview/${pathVars.id}`, {
+  return request<R<any>>(`/statistic/friendOverview/${pathVars.id}`, {
     method: 'GET',
     ...(options || {}),
   });

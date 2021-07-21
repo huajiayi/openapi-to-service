@@ -1,5 +1,6 @@
 import request from 'umi-request';
 import generateService from './serviceGenerator'
+import { Spec2 } from './swagger';
 
 interface Option {
   data: string;
@@ -24,8 +25,8 @@ const generate = async (option : Partial<Option>) => {
   if(data) {
     jsonData = JSON.parse(data);
   }
-
-  generateService(jsonData, outputDir);
+  
+  generateService(jsonData as Spec2, outputDir);
 }
 
 export default generate;

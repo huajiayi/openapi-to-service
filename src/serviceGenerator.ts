@@ -1,7 +1,14 @@
 import fs from "fs";
 import ejs from "ejs";
 import { resolve } from "path";
-import { getAllDeps, isGenerics, removeArraySign, removeGenericsSign } from "./utils";
+import {
+  getAllDeps,
+  removeArraySign,
+  removeGenericsSign,
+  toGenerics,
+  toGenericsTypes,
+} from "./utils";
+import { Spec2 } from "./swagger";
 
 type In = "path" | "query" | "body" | "formdata";
 
@@ -141,12 +148,22 @@ const getApis = (data: any, types: Type[]): API[] => {
     }
 
     if (res.schema?.originalRef) {
-      let type = res.schema?.originalRef?.replace(/«/g, "<").replace(/»/g, ">");
+      const type = res.schema?.originalRef?.replace(/«/g, "<").replace(/»/g, ">");
+      const deps = getAllDeps(type);
       // 如果泛型Type没有内部泛型，填充一个<any>
-      if(getAllDeps(type).length === 1 && generics.includes(type)) {
-        type += '<any>';
+      if (deps.length === 1 && generics.includes(type)) {
+        return type + "<any>";
       }
-      return type;
+
+      // 找出不包含在types中的依赖，设为any
+      // eslint-disable-next-line @typescript-eslint/prefer-for-of
+      const typesWithoutSign = types.map(type => removeGenericsSign(type.name));
+      for (let i = 0; i < deps.length; i++) {
+        if(!typesWithoutSign.includes(deps[i])) {
+          deps[i] = 'any';
+        }
+      }
+      return toGenerics(deps);
     }
 
     return "any";
@@ -171,11 +188,16 @@ const getApis = (data: any, types: Type[]): API[] => {
             path: params.filter((param) => param.in === "path"),
             query: params.filter((param) => param.in === "query"),
             body: params.filter((param) => param.in === "body"),
-            formdata: params.filter((param) => param.in === "formdata")
+            formdata: params.filter((param) => param.in === "formdata"),
           },
         },
         response: {
-          type: getResponseType(api.responses, types.filter(type => type.isGenerics).map(type => removeGenericsSign(type.name))),
+          type: getResponseType(
+            api.responses,
+            types
+              .filter((type) => type.isGenerics)
+              .map((type) => removeGenericsSign(type.name))
+          ),
         },
       });
     });
@@ -197,10 +219,11 @@ const getTypeParams = (properties: any, hasGenerics: boolean): Param[] => {
   });
 };
 
-const getTypes = (data: any) => {
+const getTypes = (data: Spec2) => {
   // 找出所有的泛型
+  const definitions = data.definitions || {};
   const generics = new Set<string>();
-  Object.keys(data.definitions).forEach((definition) => {
+  Object.keys(definitions).forEach((definition) => {
     const genericArr = definition.split("«");
     genericArr.pop();
     genericArr.forEach((g) => generics.add(g));
@@ -208,25 +231,29 @@ const getTypes = (data: any) => {
 
   // 取出所有的类型
   const types: Type[] = [];
-  Object.keys(data.definitions).forEach((definition) => {
-    if (definition.split("«").length > 1) {
-      return;
+  Object.keys(definitions).forEach((definition) => {
+    let defText = definition;
+    const deps = getAllDeps(toGenericsTypes(definition));
+    
+    if(deps.length > 1) {
+      defText = deps[0];
     }
 
-    const def = data.definitions[definition];
+    const def = definitions[definition];
     if (!def.properties) {
       return;
     }
 
-    const isGenerics =
-      generics.has(definition) &&
-      !types.some((type) => type.name === definition);
-    types.push({
-      isGenerics,
-      name: isGenerics ? `${definition}<T>` : definition,
-      description: def.description,
-      params: getTypeParams(def.properties, isGenerics),
-    });
+    if(!types.some((type) => removeGenericsSign(type.name) === defText)) {
+      const isGenerics =
+      generics.has(defText);
+      types.push({
+        isGenerics,
+        name: isGenerics ? `${defText}<T>` : defText,
+        description: def.description || '',
+        params: getTypeParams(def.properties, isGenerics),
+      });
+    }
   });
 
   return types;
@@ -243,7 +270,7 @@ const renderFile = (file: string, data: any): Promise<string> => {
   });
 };
 
-const generateService = async (data: any, outputDir: string) => {
+const generateService = async (data: Spec2, outputDir: string) => {
   const types = getTypes(data);
 
   // 写入type文件
@@ -262,7 +289,7 @@ const generateService = async (data: any, outputDir: string) => {
 
   // 把api按tag分组
   const tagMap = new Map<string, API[]>();
-  data.tags.forEach((tag: any) => {
+  data.tags?.forEach((tag: any) => {
     tagMap.set(tag.name, []);
   });
   apis.forEach((api) => tagMap.get(api.tag)?.push(api));
@@ -278,20 +305,20 @@ const generateService = async (data: any, outputDir: string) => {
     );
     // 找出所有依赖
     const deps = new Set<string>();
-    apis.forEach(api => {
+    apis.forEach((api) => {
       // 找出request中的依赖
-      api.request.params.forEach(param => {
+      api.request.params.forEach((param) => {
         const dep = removeArraySign(param.type);
-        if(types.some(type => removeGenericsSign(type.name) === dep)) {
+        if (types.some((type) => removeGenericsSign(type.name) === dep)) {
           deps.add(dep);
         }
-      })
+      });
       // 找出response中的依赖
-      getAllDeps(api.response.type).forEach(dep => {
-        if(types.some(type => removeGenericsSign(type.name) === dep)) {
+      getAllDeps(api.response.type).forEach((dep) => {
+        if (types.some((type) => removeGenericsSign(type.name) === dep)) {
           deps.add(dep);
         }
-      })
+      });
     });
     const service = await renderFile(filePath, { deps, apis });
     const output = resolve(outputDir, `${tag}.ts`);
